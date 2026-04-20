@@ -1,0 +1,5 @@
+# Default code owner for the repository.
+* @abhitall
+
+# Require explicit review for workflow and policy changes.
+/.github/ @abhitall

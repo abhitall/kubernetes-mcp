@@ -1,0 +1,51 @@
+[project]
+name = "kubernetes-mcp-server"
+version = "0.1.0"
+description = "Multi-cluster Kubernetes MCP Server with RCA and Self-Healing capabilities"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+keywords = ["kubernetes", "mcp", "ai", "operations", "rca", "self-healing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    "mcp[cli]>=1.26.0",
+    "kubernetes>=31.0.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "httpx>=0.27.0",
+    "starlette>=0.40.0",
+    "uvicorn>=0.30.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/abhitall/kubernetes-mcp"
+Repository = "https://github.com/abhitall/kubernetes-mcp"
+Issues = "https://github.com/abhitall/kubernetes-mcp/issues"
+Security = "https://github.com/abhitall/kubernetes-mcp/security/policy"
+
+[project.scripts]
+k8s-mcp-server = "src.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

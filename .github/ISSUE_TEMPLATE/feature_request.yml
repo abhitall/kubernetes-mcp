@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose an enhancement
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing an idea.
+        Please describe the problem and why this change is useful.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe your proposed approach.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What alternatives did you consider?
+    validations:
+      required: false
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Additional context
+      description: Mention API impact, backward compatibility, and migration concerns.
+    validations:
+      required: false
