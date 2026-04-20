@@ -1,0 +1,69 @@
+name: Bug report
+description: Report a reproducible bug
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please provide enough detail to reproduce it.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: What version/commit are you using?
+      placeholder: "e.g., 0.1.0 or main@<commit>"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: flavor
+    attributes:
+      label: Kubernetes flavor
+      options:
+        - vanilla
+        - openshift
+        - gke
+        - eks
+        - aks
+        - rancher
+        - k3s
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include exact commands and config snippets (redact secrets).
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and error output
+      description: Paste relevant logs and stack traces.
+      render: shell
+    validations:
+      required: false

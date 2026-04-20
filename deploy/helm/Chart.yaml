@@ -1,0 +1,13 @@
+apiVersion: v2
+name: kubernetes-mcp-server
+description: Multi-cluster Kubernetes MCP Server with RCA and self-healing
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - mcp
+  - model-context-protocol
+  - rca
+  - self-healing
+  - multi-cluster

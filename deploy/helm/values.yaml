@@ -1,0 +1,53 @@
+replicaCount: 1
+
+image:
+  repository: kubernetes-mcp-server
+  tag: latest
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: kubernetes-mcp-server
+
+rbac:
+  create: true
+
+service:
+  type: ClusterIP
+  port: 8080
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  transport: "streamable-http"
+  logLevel: "info"
+  readOnly: false
+
+features:
+  enableRCA: true
+  enableSelfHeal: true
+
+# Cluster registry – JSON array of ClusterConfig objects
+# Override this with your actual cluster configurations
+clusterRegistry: |
+  [
+    {
+      "name": "local",
+      "flavor": "vanilla",
+      "api_server": "https://kubernetes.default.svc",
+      "sa_token_path": "/var/run/secrets/kubernetes.io/serviceaccount/token",
+      "ca_cert_path": "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    }
+  ]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

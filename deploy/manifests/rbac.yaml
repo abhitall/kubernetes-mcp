@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubernetes-mcp-server
+  namespace: kubernetes-mcp
+  labels:
+    app.kubernetes.io/name: kubernetes-mcp-server
+---
+# ClusterRole – read/write access to cluster resources for RCA & self-heal
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubernetes-mcp-server
+  labels:
+    app.kubernetes.io/name: kubernetes-mcp-server
+rules:
+  # Core read access
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/status
+      - pods/eviction
+      - services
+      - endpoints
+      - configmaps
+      - secrets
+      - events
+      - nodes
+      - nodes/status
+      - namespaces
+      - persistentvolumeclaims
+      - persistentvolumes
+      - replicationcontrollers
+    verbs: ["get", "list", "watch"]
+  # Core write access (self-heal, restart, scale)
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/eviction
+      - nodes
+    verbs: ["create", "update", "patch", "delete"]
+  # Apps read access
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - deployments/scale
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch"]
+  # Apps write access
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - deployments/scale
+      - replicasets
+      - statefulsets
+    verbs: ["create", "update", "patch", "delete"]
+  # Batch
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Networking
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: ["get", "list", "watch"]
+  # Custom resources (for OpenShift DeploymentConfigs, Routes, etc.)
+  - apiGroups: ["apps.openshift.io"]
+    resources: ["deploymentconfigs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubernetes-mcp-server
+  labels:
+    app.kubernetes.io/name: kubernetes-mcp-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubernetes-mcp-server
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-mcp-server
+    namespace: kubernetes-mcp
