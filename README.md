@@ -33,6 +33,7 @@ Inspired by [containers/kubernetes-mcp-server](https://github.com/containers/kub
 | **14 K8s Flavors** | Vanilla, OpenShift, Rancher, GKE, EKS, AKS, K3s, K0s, MicroK8s, Kind, Minikube, Tanzu, OKD, DKP |
 | **Service Account Auth** | Universal bearer-token authentication across all flavors |
 | **Root Cause Analysis** | Automated analysis of pod crashes, node issues, deployment failures |
+| **Token-Efficient Tools** | Consolidated `*_overview`/`*_context`, `batch_read`, and field projection cut tool calls and tokens ([design](docs/TOOL_EFFICIENCY.md)) |
 | **Self-Healing** | Remediation plans with dry-run and approval workflows |
 | **MCP Protocol** | Full MCP support with tools, resources, and prompts |
 | **Read-Only Mode** | Safety mode that blocks all write operations |
@@ -51,7 +52,7 @@ flowchart TB
   subgraph MCP["Kubernetes MCP Server"]
     direction TB
     subgraph Interface["MCP Interface Layer"]
-      Tools["MCP Tools<br/>(30+ tools)"]
+      Tools["MCP Tools<br/>(40+ tools)"]
       Prompts["MCP Prompts<br/>(6 templates)"]
       Resources["MCP Resources<br/>(cluster state)"]
     end
@@ -373,6 +374,26 @@ CLUSTER_REGISTRY='[{"name": "local", "flavor": "vanilla", "proxy_url": "http://l
 ---
 
 ## MCP Tools Reference
+
+### Token-Efficient / Consolidated Tools (prefer these)
+
+These fold multi-step workflows into a single high-signal call and let the agent
+control verbosity, reducing both tool calls and tokens. Design and live-cluster
+measurements (e.g. **98.2%** fewer tokens for a concise pod payload) are in
+[docs/TOOL_EFFICIENCY.md](docs/TOOL_EFFICIENCY.md).
+
+| Tool | Description | Replaces | Parameters |
+|------|-------------|----------|------------|
+| `cluster_overview` | Node readiness, problem nodes, ns count, recent warnings | `list_nodes` + `list_namespaces` + `list_events` | `cluster` |
+| `namespace_overview` | Pod phase counts, problem pods, unhealthy deployments, unbound PVCs, warnings | `list_pods` + `list_deployments` + `list_events` + `list_pvcs` + `list_services` | `cluster`, `namespace?` |
+| `get_pod_context` | Status + container failure reasons + events + logs (incl. previous) | `get_pod` + `describe_resource` + `get_pod_logs` + `list_events` | `cluster`, `name`, `namespace?`, `tail_lines?`, `include_logs?`, `response_format?` |
+| `get_deployment_context` | Summary + rollout + owned pods + events | `get_deployment` + `get_rollout_status` + `list_pods` + `list_events` | `cluster`, `name`, `namespace?`, `response_format?` |
+| `project_resource` | Return only the requested dotted-path fields | `get_resource` + client-side filtering | `cluster`, `api_version`, `kind`, `name`, `fields`, `namespace?` |
+| `batch_read` | Run many read-only ops in one round-trip | N separate tool calls | `cluster`, `operations` |
+
+> The granular `list_*`/`get_*` tools below remain available. `list_pods` and
+> `list_resources` accept a `limit`, and `get_pod` accepts
+> `response_format="concise"`.
 
 ### Cluster Management
 

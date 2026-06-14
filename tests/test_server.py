@@ -103,14 +103,21 @@ def test_heal_plan():
 # ── Config Tests ─────────────────────────────────────────────────────────────
 
 
-def test_settings_defaults():
-    with patch.dict(os.environ, {}, clear=True):
-        # Re-import to pick up env changes
-        from importlib import reload
+def _reload_settings_isolated():
+    """Reload src.config with a no-op load_dotenv so .env can't leak in."""
+    from importlib import reload
 
+    import dotenv
+
+    with patch.object(dotenv, "load_dotenv", lambda *a, **kw: None):
         import src.config
         reload(src.config)
-        s = src.config.Settings()
+        return src.config.Settings()
+
+
+def test_settings_defaults():
+    with patch.dict(os.environ, {}, clear=True):
+        s = _reload_settings_isolated()
         assert s.host == "0.0.0.0"
         assert s.port == 8080
         assert s.transport == "streamable-http"
@@ -127,11 +134,7 @@ def test_settings_cluster_registry():
         "sa_token": "tok",
     }])
     with patch.dict(os.environ, {"CLUSTER_REGISTRY": registry}, clear=True):
-        from importlib import reload
-
-        import src.config
-        reload(src.config)
-        s = src.config.Settings()
+        s = _reload_settings_isolated()
         assert len(s.clusters) == 1
         assert s.clusters[0].name == "test"
 

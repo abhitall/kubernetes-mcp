@@ -8,6 +8,7 @@ transports.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import warnings
@@ -16,6 +17,9 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import urllib3
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from mcp.server.fastmcp import FastMCP
 
@@ -24,7 +28,7 @@ from src.connectors.cluster import connector
 from src.models import ClusterConfig, K8sFlavor
 from src.prompts.k8s_prompts import get_prompt
 from src.resources.cluster_resources import get_cluster_health_resource, get_cluster_list
-from src.tools import k8s_ops
+from src.tools import efficient_ops, k8s_ops
 from src.tools.rca import run_cluster_rca, run_namespace_rca, run_pod_rca
 from src.tools.self_heal import execute_heal_plan, generate_heal_plan, quick_heal
 
@@ -46,15 +50,37 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     for cfg in settings.clusters:
         try:
             connector.register(cfg)
-            health = connector.health_check(cfg.name)
-            logger.info(
-                "  ✓ %s (%s) – %s",
-                cfg.name,
-                cfg.flavor.value,
-                "healthy" if health.reachable else "UNREACHABLE",
-            )
         except Exception as e:
             logger.warning("  ✗ %s – failed to register: %s", cfg.name, e)
+
+    # Run a lightweight reachability check (version only) in background threads.
+    # The full health_check (lists pods/nodes/events) is too expensive for
+    # startup — it can take minutes on large production clusters.
+    async def _check_cluster(name: str) -> None:
+        try:
+            from kubernetes import client as k8s_client
+
+            def _fast_ping() -> str:
+                api = connector.get_client(name)
+                ver = k8s_client.VersionApi(api).get_code()
+                return f"v{ver.major}.{ver.minor}"
+
+            version = await asyncio.to_thread(_fast_ping)
+            logger.info(
+                "  ✓ %s (%s) – reachable (%s)",
+                name,
+                connector.get_config(name).flavor.value,
+                version,
+            )
+        except Exception as e:
+            logger.warning("  ✗ %s – unreachable: %s", name, e)
+
+    # Fire all reachability checks concurrently (non-blocking)
+    if connector.clusters:
+        await asyncio.gather(
+            *[_check_cluster(name) for name in connector.clusters],
+            return_exceptions=True,
+        )
 
     logger.info("%d cluster(s) registered.", len(connector.clusters))
 
@@ -86,7 +112,18 @@ mcp = FastMCP(
         "Multi-cluster Kubernetes MCP server with RCA and self-healing. "
         "Use cluster management tools to list and inspect clusters, Kubernetes "
         "operations tools to manage workloads, RCA tools to diagnose issues, "
-        "and self-heal tools to remediate problems."
+        "and self-heal tools to remediate problems.\n\n"
+        "To stay token-efficient, PREFER the consolidated read tools over chaining "
+        "granular calls:\n"
+        "• cluster_overview — cluster posture in one call\n"
+        "• namespace_overview — triage a namespace in one call\n"
+        "• get_pod_context — pod status + events + logs in one call (use before get_pod/get_pod_logs)\n"
+        "• get_deployment_context — deployment + rollout + pods + events in one call\n"
+        "• batch_read — run many read operations in a single round-trip\n"
+        "• project_resource — return only the specific fields you need\n"
+        "Granular list_*/get_* tools accept selectors and a `limit`; narrow with "
+        "label/field selectors instead of listing everything, and request "
+        "response_format='detailed' only when you actually need the full object."
     ),
     lifespan=lifespan,
 )
@@ -145,9 +182,13 @@ def register_cluster(
 
 
 @mcp.tool(structured_output=False)
-def list_namespaces(cluster: str) -> list[dict]:
-    """List all namespaces in a cluster."""
-    return k8s_ops.list_namespaces(cluster)
+def list_namespaces(cluster: str, label_selector: str = "",
+                    field_selector: str = "") -> list[dict]:
+    """List all namespaces in a cluster with labels, annotations, and status.
+
+    Supports filtering by label_selector (e.g. 'env=prod') and
+    field_selector (e.g. 'metadata.name=kube-system,status.phase=Active')."""
+    return k8s_ops.list_namespaces(cluster, label_selector, field_selector)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -156,14 +197,19 @@ def list_namespaces(cluster: str) -> list[dict]:
 
 
 @mcp.tool(structured_output=False)
-def list_pods(cluster: str, namespace: str = "default") -> list[dict]:
-    """List pods in a namespace. Returns name, phase, restarts, and node for each pod."""
-    return k8s_ops.list_pods(cluster, namespace)
+def list_pods(cluster: str, namespace: str = "default",
+              label_selector: str = "", field_selector: str = "") -> list[dict]:
+    """List pods with full metadata including labels, annotations, images, resource requests/limits, QoS class, and status.
+
+    Supports filtering:
+    - label_selector: e.g. 'app=myapp,env=prod' or 'app in (myapp,yourapp)'
+    - field_selector: e.g. 'status.phase=Running', 'spec.nodeName=node1'"""
+    return k8s_ops.list_pods(cluster, namespace, label_selector, field_selector)
 
 
 @mcp.tool(structured_output=False)
 def get_pod(cluster: str, name: str, namespace: str = "default") -> dict:
-    """Get detailed information about a specific pod."""
+    """Get detailed information about a specific pod (full spec/status)."""
     return k8s_ops.get_pod(cluster, namespace, name)
 
 
@@ -196,20 +242,39 @@ def restart_pod(cluster: str, name: str, namespace: str = "default") -> dict:
     return k8s_ops.restart_pod(cluster, namespace, name)
 
 
+@mcp.tool(structured_output=False)
+def exec_pod(cluster: str, name: str, command: list[str],
+             namespace: str = "default", container: str | None = None) -> dict:
+    """Execute a command inside a running pod. Returns stdout/stderr output.
+
+    Example: exec_pod(cluster='mycluster', name='nginx-pod', command=['ls', '-la', '/tmp'])"""
+    return k8s_ops.exec_pod(cluster, namespace, name, command, container)
+
+
+@mcp.tool(structured_output=False)
+def top_pods(cluster: str, namespace: str = "") -> list[dict]:
+    """Get resource usage (CPU/memory) for pods from the Kubernetes Metrics API.
+    Requires metrics-server to be installed in the cluster."""
+    return k8s_ops.top_pods(cluster, namespace)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  DEPLOYMENT TOOLS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
 @mcp.tool(structured_output=False)
-def list_deployments(cluster: str, namespace: str = "default") -> list[dict]:
-    """List deployments in a namespace with replica status."""
-    return k8s_ops.list_deployments(cluster, namespace)
+def list_deployments(cluster: str, namespace: str = "default",
+                     label_selector: str = "") -> list[dict]:
+    """List deployments with full metadata including labels, annotations, strategy, images, and conditions.
+
+    Supports label_selector filtering (e.g. 'app=myapp')."""
+    return k8s_ops.list_deployments(cluster, namespace, label_selector)
 
 
 @mcp.tool(structured_output=False)
 def get_deployment(cluster: str, name: str, namespace: str = "default") -> dict:
-    """Get detailed information about a specific deployment."""
+    """Get detailed information about a specific deployment (full spec/status)."""
     return k8s_ops.get_deployment(cluster, namespace, name)
 
 
@@ -229,15 +294,42 @@ def restart_deployment(cluster: str, name: str, namespace: str = "default") -> d
     return k8s_ops.restart_deployment(cluster, namespace, name)
 
 
+@mcp.tool(structured_output=False)
+def get_rollout_status(cluster: str, name: str, namespace: str = "default") -> dict:
+    """Get the rollout status of a deployment (similar to kubectl rollout status).
+    Shows progress, conditions, and replica counts."""
+    return k8s_ops.get_rollout_status(cluster, namespace, name)
+
+
+@mcp.tool(structured_output=False)
+def rollback_deployment(cluster: str, name: str, namespace: str = "default",
+                        revision: int = 0) -> dict:
+    """Rollback a deployment to a previous revision.
+    If revision=0, rolls back to the immediately previous revision.
+    Otherwise specify the exact revision number to roll back to."""
+    if settings.read_only:
+        return {"error": "Server is in read-only mode."}
+    return k8s_ops.rollback_deployment(cluster, namespace, name, revision)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  NODE TOOLS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
 @mcp.tool(structured_output=False)
-def list_nodes(cluster: str) -> list[dict]:
-    """List all nodes in a cluster with status, roles, and resource info."""
-    return k8s_ops.list_nodes(cluster)
+def list_nodes(cluster: str, label_selector: str = "") -> list[dict]:
+    """List all nodes with enriched info: capacity, allocatable resources, taints, conditions, IPs, and labels.
+
+    Supports label_selector filtering (e.g. 'node-role.kubernetes.io/worker=')."""
+    return k8s_ops.list_nodes(cluster, label_selector)
+
+
+@mcp.tool(structured_output=False)
+def top_nodes(cluster: str) -> list[dict]:
+    """Get resource usage (CPU/memory) for all nodes from the Kubernetes Metrics API.
+    Requires metrics-server to be installed in the cluster."""
+    return k8s_ops.top_nodes(cluster)
 
 
 @mcp.tool(structured_output=False)
@@ -262,33 +354,49 @@ def uncordon_node(cluster: str, node_name: str) -> dict:
 
 
 @mcp.tool(structured_output=False)
-def list_events(cluster: str, namespace: str = "default") -> list[dict]:
-    """List recent events in a namespace."""
-    return k8s_ops.list_events(cluster, namespace)
+def list_events(cluster: str, namespace: str = "default",
+                event_type: str = "", field_selector: str = "",
+                limit: int = 100) -> list[dict]:
+    """List recent events with enriched metadata.
+
+    Supports filtering:
+    - event_type: 'Warning' or 'Normal'
+    - field_selector: e.g. 'involvedObject.name=mypod,involvedObject.kind=Pod'
+    - limit: max events to return (default 100)"""
+    return k8s_ops.list_events(cluster, namespace, event_type, field_selector, limit)
 
 
 @mcp.tool(structured_output=False)
-def list_services(cluster: str, namespace: str = "default") -> list[dict]:
-    """List services in a namespace."""
-    return k8s_ops.list_services(cluster, namespace)
+def list_services(cluster: str, namespace: str = "default",
+                  label_selector: str = "") -> list[dict]:
+    """List services with full metadata including selectors, external IPs, labels, and annotations.
+
+    Supports label_selector filtering (e.g. 'app=myapp')."""
+    return k8s_ops.list_services(cluster, namespace, label_selector)
 
 
 @mcp.tool(structured_output=False)
-def list_configmaps(cluster: str, namespace: str = "default") -> list[dict]:
-    """List ConfigMaps in a namespace."""
-    return k8s_ops.list_configmaps(cluster, namespace)
+def list_configmaps(cluster: str, namespace: str = "default",
+                    label_selector: str = "") -> list[dict]:
+    """List ConfigMaps with data keys, labels, and annotations.
+
+    Supports label_selector filtering."""
+    return k8s_ops.list_configmaps(cluster, namespace, label_selector)
 
 
 @mcp.tool(structured_output=False)
 def get_configmap(cluster: str, name: str, namespace: str = "default") -> dict:
-    """Get a specific ConfigMap's data."""
+    """Get a specific ConfigMap's full data, labels, and annotations."""
     return k8s_ops.get_configmap(cluster, namespace, name)
 
 
 @mcp.tool(structured_output=False)
-def list_secrets(cluster: str, namespace: str = "default") -> list[dict]:
-    """List secrets in a namespace (names and types only, no data)."""
-    return k8s_ops.list_secrets(cluster, namespace)
+def list_secrets(cluster: str, namespace: str = "default",
+                 label_selector: str = "") -> list[dict]:
+    """List secrets (names, types, data keys, labels – no actual secret data exposed).
+
+    Supports label_selector filtering."""
+    return k8s_ops.list_secrets(cluster, namespace, label_selector)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -304,7 +412,10 @@ def get_resource(
     name: str,
     namespace: str | None = None,
 ) -> dict:
-    """Get any Kubernetes resource by apiVersion, kind, name, and optional namespace."""
+    """Get any Kubernetes resource by apiVersion, kind, name, and optional namespace.
+    Returns the full resource spec/status as YAML-like dict.
+
+    Common apiVersion/kind: v1/Pod, v1/Service, apps/v1/Deployment, networking.k8s.io/v1/Ingress"""
     return k8s_ops.get_resource(cluster, api_version, kind, name, namespace)
 
 
@@ -314,9 +425,14 @@ def list_resources(
     api_version: str,
     kind: str,
     namespace: str | None = None,
+    label_selector: str = "",
+    field_selector: str = "",
 ) -> list[dict]:
-    """List Kubernetes resources by apiVersion and kind, optionally in a namespace."""
-    return k8s_ops.list_resources(cluster, api_version, kind, namespace)
+    """List any Kubernetes resources by apiVersion and kind.
+
+    Supports label_selector and field_selector filtering.
+    Common apiVersion/kind: v1/Pod, apps/v1/Deployment, batch/v1/Job, networking.k8s.io/v1/Ingress"""
+    return k8s_ops.list_resources(cluster, api_version, kind, namespace, label_selector, field_selector)
 
 
 @mcp.tool(structured_output=False)
@@ -339,6 +455,224 @@ def delete_resource(
     if settings.read_only:
         return {"error": "Server is in read-only mode."}
     return k8s_ops.delete_resource(cluster, api_version, kind, name, namespace)
+
+
+@mcp.tool(structured_output=False)
+def describe_resource(
+    cluster: str,
+    api_version: str,
+    kind: str,
+    name: str,
+    namespace: str | None = None,
+) -> dict:
+    """Get a rich description of any Kubernetes resource combining its full spec/status
+    with related events (similar to 'kubectl describe').
+
+    Common apiVersion/kind: v1/Pod, apps/v1/Deployment, v1/Service, v1/Node"""
+    return k8s_ops.describe_resource(cluster, api_version, kind, name, namespace)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  STATEFULSET TOOLS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@mcp.tool(structured_output=False)
+def list_statefulsets(cluster: str, namespace: str = "default",
+                     label_selector: str = "") -> list[dict]:
+    """List StatefulSets with replicas, images, service name, and update strategy.
+
+    Supports label_selector filtering."""
+    return k8s_ops.list_statefulsets(cluster, namespace, label_selector)
+
+
+@mcp.tool(structured_output=False)
+def get_statefulset(cluster: str, name: str, namespace: str = "default") -> dict:
+    """Get detailed information about a specific StatefulSet (full spec/status)."""
+    return k8s_ops.get_statefulset(cluster, namespace, name)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  DAEMONSET TOOLS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@mcp.tool(structured_output=False)
+def list_daemonsets(cluster: str, namespace: str = "default",
+                   label_selector: str = "") -> list[dict]:
+    """List DaemonSets with scheduled/ready counts, images, and node selectors.
+
+    Supports label_selector filtering."""
+    return k8s_ops.list_daemonsets(cluster, namespace, label_selector)
+
+
+@mcp.tool(structured_output=False)
+def get_daemonset(cluster: str, name: str, namespace: str = "default") -> dict:
+    """Get detailed information about a specific DaemonSet (full spec/status)."""
+    return k8s_ops.get_daemonset(cluster, namespace, name)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  JOB / CRONJOB TOOLS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@mcp.tool(structured_output=False)
+def list_jobs(cluster: str, namespace: str = "default",
+              label_selector: str = "") -> list[dict]:
+    """List Jobs with completion status, active/failed counts, and duration.
+
+    Supports label_selector filtering."""
+    return k8s_ops.list_jobs(cluster, namespace, label_selector)
+
+
+@mcp.tool(structured_output=False)
+def list_cronjobs(cluster: str, namespace: str = "default",
+                  label_selector: str = "") -> list[dict]:
+    """List CronJobs with schedule, suspend status, last run time, and active job count.
+
+    Supports label_selector filtering."""
+    return k8s_ops.list_cronjobs(cluster, namespace, label_selector)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  INGRESS TOOLS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@mcp.tool(structured_output=False)
+def list_ingresses(cluster: str, namespace: str = "default",
+                   label_selector: str = "") -> list[dict]:
+    """List Ingresses with rules (hosts/paths/backends), TLS config, and load balancer IPs.
+
+    Supports label_selector filtering."""
+    return k8s_ops.list_ingresses(cluster, namespace, label_selector)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  PVC TOOLS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@mcp.tool(structured_output=False)
+def list_pvcs(cluster: str, namespace: str = "default",
+              label_selector: str = "") -> list[dict]:
+    """List PersistentVolumeClaims with status, capacity, access modes, and storage class.
+
+    Supports label_selector filtering."""
+    return k8s_ops.list_pvcs(cluster, namespace, label_selector)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  HPA TOOLS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@mcp.tool(structured_output=False)
+def list_hpas(cluster: str, namespace: str = "default",
+              label_selector: str = "") -> list[dict]:
+    """List HorizontalPodAutoscalers with target reference, min/max/current replicas,
+    and current/target metrics.
+
+    Supports label_selector filtering."""
+    return k8s_ops.list_hpas(cluster, namespace, label_selector)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  TOKEN-EFFICIENT / CONSOLIDATED TOOLS
+#
+#  These fold several round-trips into one high-signal call and let the agent
+#  control verbosity. Prefer them over chaining the granular tools above.
+#  See docs/TOOL_EFFICIENCY.md for the design and the research it is based on.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@mcp.tool(structured_output=False)
+def cluster_overview(cluster: str) -> dict:
+    """One-call cluster posture: node readiness, problem nodes, namespace count,
+    and the most recent cluster-wide warning events.
+
+    Use this first instead of separately calling list_nodes + list_namespaces +
+    list_events. It is intentionally light (no all-pod listing)."""
+    return efficient_ops.cluster_overview(cluster)
+
+
+@mcp.tool(structured_output=False)
+def namespace_overview(cluster: str, namespace: str = "default") -> dict:
+    """One-call namespace triage: pod phase counts, the specific problem pods,
+    under-provisioned deployments, unbound PVCs, service count, and recent
+    warnings.
+
+    Replaces list_pods + list_deployments + list_events + list_pvcs +
+    list_services followed by manual filtering."""
+    return efficient_ops.namespace_overview(cluster, namespace)
+
+
+@mcp.tool(structured_output=False)
+def get_pod_context(
+    cluster: str,
+    name: str,
+    namespace: str = "default",
+    tail_lines: int = 50,
+    include_logs: bool = True,
+    response_format: str = "concise",
+) -> dict:
+    """Everything needed to triage one pod in a single call: status, per-container
+    states with failure reasons/exit codes, owner refs, conditions, scoped
+    events, and log tails (previous logs included automatically for restarting
+    containers).
+
+    Replaces get_pod + describe_resource + get_pod_logs + list_events. Set
+    response_format='detailed' to also include the full raw pod object."""
+    return efficient_ops.get_pod_context(
+        cluster, namespace, name, tail_lines, include_logs, response_format
+    )
+
+
+@mcp.tool(structured_output=False)
+def get_deployment_context(
+    cluster: str,
+    name: str,
+    namespace: str = "default",
+    response_format: str = "concise",
+) -> dict:
+    """Deployment health in one call: summary, rollout progress/conditions, the
+    pods it owns (concise), and recent events.
+
+    Replaces get_deployment + get_rollout_status + list_pods + list_events. Set
+    response_format='detailed' to also include the full raw deployment object."""
+    return efficient_ops.get_deployment_context(cluster, namespace, name, response_format)
+
+
+@mcp.tool(structured_output=False)
+def project_resource(
+    cluster: str,
+    api_version: str,
+    kind: str,
+    name: str,
+    fields: list[str],
+    namespace: str | None = None,
+) -> dict:
+    """Fetch any resource but return ONLY the requested dotted-path fields,
+    keeping large objects out of context.
+
+    Example fields: ["status.phase", "spec.nodeName",
+    "status.containerStatuses[0].restartCount"]."""
+    return efficient_ops.project_resource(cluster, api_version, kind, name, fields, namespace)
+
+
+@mcp.tool(structured_output=False)
+def batch_read(cluster: str, operations: list[dict]) -> list[dict]:
+    """Run several READ-ONLY operations against one cluster in a single round-trip
+    instead of chaining individual tool calls.
+
+    Each operation is {"op": "<name>", "args": {...}} where args are the tool's
+    keyword arguments excluding 'cluster'. Example:
+      [{"op": "namespace_overview", "args": {"namespace": "prod"}},
+       {"op": "list_nodes", "args": {}},
+       {"op": "get_pod_context", "args": {"namespace": "prod", "name": "api-0"}}]
+    A failure in one operation does not abort the others."""
+    return efficient_ops.batch_read(cluster, operations)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -489,8 +823,15 @@ def cluster_health_resource(cluster: str) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+async def health_endpoint(request: Request) -> JSONResponse:
+    """Health check endpoint for Kubernetes probes."""
+    return JSONResponse({"status": "ok"})
+
+
 def main():
     """Run the MCP server."""
+    import uvicorn
+
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -506,10 +847,20 @@ def main():
     mcp.settings.host = settings.host
     mcp.settings.port = settings.port
 
-    if settings.transport == "streamable-http":
-        mcp.run(transport="streamable-http")
-    elif settings.transport == "sse":
-        mcp.run(transport="sse")
+    if settings.transport in ("streamable-http", "sse"):
+        # Disable DNS rebinding protection for production (behind Istio gateway)
+        if mcp.settings.transport_security:
+            mcp.settings.transport_security.enable_dns_rebinding_protection = False
+
+        # Add health endpoint as a custom route in the MCP app
+        mcp._custom_starlette_routes = [
+            Route("/health", health_endpoint, methods=["GET"]),
+        ]
+
+        # Use the MCP app directly – it handles /mcp path internally
+        # and properly manages its own lifespan (session manager task group)
+        app = mcp.streamable_http_app()
+        uvicorn.run(app, host=settings.host, port=settings.port)
     else:
         mcp.run(transport="stdio")
 

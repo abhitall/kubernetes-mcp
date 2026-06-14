@@ -127,12 +127,14 @@ flowchart TB
 
     subgraph ToolHandlers["Tool Handlers (@mcp.tool)"]
       ClusterTools["Cluster management tools"]
-      OpsTools["K8s operations tools"]
+      OpsTools["K8s operations tools<br/>(granular: list_*/get_*)"]
+      EfficientTools["Consolidated tools<br/>(*_overview, *_context,<br/>project_resource, batch_read)"]
       SmartTools["RCA + self-heal tools"]
     end
 
     subgraph Logic["Business Logic Layer"]
-      K8sOps["k8s_ops"]
+      EfficientOps["efficient_ops<br/>(compose + summarize + filter)"]
+      K8sOps["k8s_ops<br/>(primitives + core-API router)"]
       RCA["rca"]
       SelfHeal["self_heal"]
     end
@@ -142,9 +144,12 @@ flowchart TB
     Transport --> Protocol
     Protocol --> ClusterTools
     Protocol --> OpsTools
+    Protocol --> EfficientTools
     Protocol --> SmartTools
     ClusterTools --> K8sOps
     OpsTools --> K8sOps
+    EfficientTools --> EfficientOps
+    EfficientOps --> K8sOps
     SmartTools --> RCA
     SmartTools --> SelfHeal
     K8sOps --> Connector
@@ -152,6 +157,14 @@ flowchart TB
     SelfHeal --> Connector
   end
 ```
+
+> **Token- & tool-call efficiency.** The consolidated tools fold multi-step
+> workflows (e.g. pod triage = `get_pod` + `describe` + logs + events) into a
+> single high-signal call, default to `concise` output, and offer read-only
+> fan-out (`batch_read`) and field projection (`project_resource`). The design,
+> the Anthropic research it is based on, and live-cluster measurements
+> (e.g. **98.2%** fewer tokens for a concise pod payload) are documented in
+> [TOOL_EFFICIENCY.md](TOOL_EFFICIENCY.md).
 
 ### 2.2 Request Lifecycle
 
@@ -411,3 +424,15 @@ Enable `READ_ONLY=true` for monitoring-only deployments that should never modify
 1. Add an executor function `_exec_*` in `self_heal.py`
 2. Register it in `_EXECUTORS` dict
 3. Map conditions to actions in `_actions_for_condition()`
+
+### Adding Consolidated / Token-Efficient Tools
+
+1. Add a composing function in `efficient_ops.py` that calls existing
+   primitives and returns a concise dict (full object only under
+   `response_format="detailed"`)
+2. If it should be available to `batch_read`, add it to the read-only
+   `_BATCH_OPS` allow-list (never add mutating operations)
+3. Register a thin `@mcp.tool` wrapper in `server.py` and mention it in the
+   server `instructions` so agents prefer it
+
+See [TOOL_EFFICIENCY.md](TOOL_EFFICIENCY.md) for the full HLD/LLD and rationale.

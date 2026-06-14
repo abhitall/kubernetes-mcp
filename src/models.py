@@ -50,9 +50,27 @@ class ClusterConfig(BaseModel):
     proxy_url: str | None = Field(
         None,
         description=(
-            "URL of a kubectl proxy or API gateway (e.g. http://localhost:8001). "
-            "When set, all requests are routed through this proxy and no "
-            "authentication tokens are needed."
+            "URL of a kubectl proxy or API gateway (e.g. http://localhost:8001 "
+            "or http://k8s-api-proxy.default.svc.cluster.local:8443). When set, "
+            "all requests are routed through this proxy and no SA token is required."
+        ),
+    )
+    proxy_auth_token: str | None = Field(
+        None,
+        description=(
+            "Optional shared secret forwarded to the proxy as an X-Proxy-Token "
+            "header. Use when the proxy is configured with PROXY_AUTH_TOKEN."
+        ),
+    )
+    proxy_auth_header: str = Field(
+        "X-Proxy-Token",
+        description="Name of the HTTP header to carry proxy_auth_token (default X-Proxy-Token).",
+    )
+    proxy_verify_tls: bool = Field(
+        True,
+        description=(
+            "Verify the proxy's TLS certificate when proxy_url uses https. "
+            "Set to false only for trusted internal proxies with self-signed certs."
         ),
     )
 
@@ -62,8 +80,22 @@ class ClusterConfig(BaseModel):
     ca_cert: str | None = Field(None, description="CA certificate data (base64-encoded PEM)")
     ca_cert_path: str | None = Field(None, description="Path to CA certificate file")
     kubeconfig_path: str | None = Field(None, description="Path to kubeconfig file (fallback)")
+    kubeconfig_yaml: str | None = Field(
+        None,
+        description=(
+            "Inline kubeconfig YAML/JSON as a string. Useful when mounting a "
+            "kubeconfig file is impractical (e.g. passing creds via mcp.json env)."
+        ),
+    )
     kubeconfig_context: str | None = Field(None, description="Specific context within kubeconfig")
     skip_tls_verify: bool = Field(False, description="Skip TLS certificate verification (dev only)")
+    is_default: bool = Field(
+        False,
+        description=(
+            "Marks this cluster as the default target. Tools that omit a cluster "
+            "argument will fall back to the default."
+        ),
+    )
 
     # ── Flavor-specific ──
     openshift_oauth_token: str | None = Field(None, description="OpenShift OAuth token (if using OAuth)")

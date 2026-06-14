@@ -13,11 +13,24 @@ from src.connectors.cluster import connector
 def get_cluster_list() -> list[dict]:
     """Return a summary list of all registered clusters."""
     result = []
+    default = connector.default_cluster
     for name, cfg in connector.clusters.items():
+        if cfg.proxy_url:
+            endpoint = f"proxy:{cfg.proxy_url}"
+        elif cfg.api_server:
+            endpoint = cfg.api_server
+        elif cfg.kubeconfig_yaml:
+            endpoint = "(inline kubeconfig)"
+        elif cfg.kubeconfig_path:
+            endpoint = f"kubeconfig:{cfg.kubeconfig_path}"
+        else:
+            endpoint = "(in-cluster)"
         result.append({
             "name": name,
             "flavor": cfg.flavor.value if cfg.flavor else "unknown",
-            "api_server": cfg.api_server or "(kubeconfig)",
+            "endpoint": endpoint,
+            "namespace": cfg.namespace,
+            "is_default": name == default,
         })
     return result
 
