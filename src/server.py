@@ -473,6 +473,62 @@ def describe_resource(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  CUSTOM RESOURCE / CRD TOOLS
+#
+#  Discover and query CustomResourceDefinitions and their instances. The CRD is
+#  resolved automatically so you can fetch CRs by Kind without knowing the
+#  apiVersion, plural, or scope.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@mcp.tool(structured_output=False)
+def list_crds(cluster: str, label_selector: str = "") -> list[dict]:
+    """List CustomResourceDefinitions with group, kind, plural, scope, served/
+    storage versions, and short names — everything needed to then query the CRs."""
+    return k8s_ops.list_crds(cluster, label_selector)
+
+
+@mcp.tool(structured_output=False)
+def list_api_resources(cluster: str, api_version: str = "") -> list[dict]:
+    """Discover served API resources (like 'kubectl api-resources').
+
+    With api_version (e.g. 'cert-manager.io/v1') lists that group's kinds; with
+    no argument enumerates every served group at its preferred version. Use this
+    to find which custom and built-in kinds exist before querying them."""
+    return k8s_ops.list_api_resources(cluster, api_version)
+
+
+@mcp.tool(structured_output=False)
+def list_custom_resources(
+    cluster: str,
+    kind: str,
+    namespace: str | None = None,
+    label_selector: str = "",
+    limit: int = 0,
+) -> list[dict]:
+    """List Custom Resources by Kind alone (e.g. kind='Certificate').
+
+    The CRD is looked up to resolve its group, version, plural, and scope, so you
+    don't need the apiVersion. For namespaced kinds, omit namespace to list
+    across all namespaces."""
+    return k8s_ops.list_custom_resources(cluster, kind, namespace, label_selector, limit)
+
+
+@mcp.tool(structured_output=False)
+def get_custom_resource(
+    cluster: str,
+    kind: str,
+    name: str,
+    namespace: str | None = None,
+) -> dict:
+    """Get a single Custom Resource by Kind and name (CRD resolved automatically).
+
+    Example: get_custom_resource(cluster='c', kind='Certificate', name='my-cert',
+    namespace='default')."""
+    return k8s_ops.get_custom_resource(cluster, kind, name, namespace)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  STATEFULSET TOOLS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

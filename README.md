@@ -34,6 +34,7 @@ Inspired by [containers/kubernetes-mcp-server](https://github.com/containers/kub
 | **Service Account Auth** | Universal bearer-token authentication across all flavors |
 | **Root Cause Analysis** | Automated analysis of pod crashes, node issues, deployment failures |
 | **Token-Efficient Tools** | Consolidated `*_overview`/`*_context`, `batch_read`, and field projection cut tool calls and tokens ([design](docs/TOOL_EFFICIENCY.md)) |
+| **Custom Resources & CRDs** | Discover and query any CRD/CR — by Kind alone — with plural/scope resolved via live API discovery (not guesswork) |
 | **Self-Healing** | Remediation plans with dry-run and approval workflows |
 | **MCP Protocol** | Full MCP support with tools, resources, and prompts |
 | **Read-Only Mode** | Safety mode that blocks all write operations |
@@ -451,9 +452,22 @@ measurements (e.g. **98.2%** fewer tokens for a concise pod payload) are in
 | Tool | Description | Parameters |
 |------|-------------|------------|
 | `get_resource` | Get any resource | `cluster`, `api_version`, `kind`, `name`, `namespace?` |
-| `list_resources` | List any resources | `cluster`, `api_version`, `kind`, `namespace?` |
+| `list_resources` | List any resources | `cluster`, `api_version`, `kind`, `namespace?`, `limit?` |
 | `create_or_update_resource` | Apply a manifest | `cluster`, `manifest` |
 | `delete_resource` | Delete any resource | `cluster`, `api_version`, `kind`, `name`, `namespace?` |
+
+> Generic resource ops resolve the plural name and scope via **live API
+> discovery** (with a heuristic fallback), so they work for core kinds and any
+> CRD without the caller guessing plurals.
+
+### Custom Resources & CRDs
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `list_crds` | List CustomResourceDefinitions (group, kind, plural, scope, versions, short names) | `cluster`, `label_selector?` |
+| `list_api_resources` | Discover served kinds, like `kubectl api-resources` | `cluster`, `api_version?` |
+| `list_custom_resources` | List CRs **by Kind alone** (CRD auto-resolved) | `cluster`, `kind`, `namespace?`, `label_selector?`, `limit?` |
+| `get_custom_resource` | Get one CR by Kind + name (CRD auto-resolved) | `cluster`, `kind`, `name`, `namespace?` |
 
 ### RCA Tools
 

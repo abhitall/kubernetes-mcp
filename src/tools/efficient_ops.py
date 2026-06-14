@@ -458,6 +458,11 @@ _BATCH_OPS = {
     "list_resources": k8s_ops.list_resources,
     "get_resource": k8s_ops.get_resource,
     "describe_resource": k8s_ops.describe_resource,
+    # custom resources / CRDs
+    "list_crds": k8s_ops.list_crds,
+    "list_api_resources": k8s_ops.list_api_resources,
+    "list_custom_resources": k8s_ops.list_custom_resources,
+    "get_custom_resource": k8s_ops.get_custom_resource,
     # consolidated read tools
     "get_pod_context": get_pod_context,
     "namespace_overview": namespace_overview,

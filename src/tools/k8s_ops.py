@@ -796,11 +796,12 @@ def list_secrets(cluster: str, namespace: str,
 
 def _core_api_request(cluster: str, version: str, plural: str, *,
                       name: str | None = None, namespace: str | None = None,
-                      query: dict[str, Any] | None = None) -> Any:
-    """Raw GET against the core API group (``/api/{version}/...``).
+                      query: dict[str, Any] | None = None,
+                      method: str = "GET") -> Any:
+    """Raw request against the core API group (``/api/{version}/...``).
 
     ``CustomObjectsApi`` only serves grouped APIs (``/apis/{group}/...``), so
-    core kinds (Pod, Service, ConfigMap, Node, …) must be fetched via the core
+    core kinds (Pod, Service, ConfigMap, Node, …) must be reached via the core
     path directly or the request 404s. Auth headers are taken from the
     ApiClient's default headers configured by the connector.
     """
@@ -816,7 +817,7 @@ def _core_api_request(cluster: str, version: str, plural: str, *,
 
     resp = api_client.call_api(
         path,
-        "GET",
+        method,
         query_params=list((query or {}).items()),
         header_params={"Accept": "application/json"},
         auth_settings=[],
@@ -830,7 +831,7 @@ def get_resource(cluster: str, api_version: str, kind: str,
                  name: str, namespace: str | None = None) -> dict[str, Any]:
     """Get any Kubernetes resource by apiVersion/kind (core or CRD)."""
     group, version = _parse_api_version(api_version)
-    plural = _kind_to_plural(kind)
+    plural, _ = _resolve_resource(cluster, api_version, kind)
 
     try:
         if group == "":
@@ -856,7 +857,7 @@ def list_resources(cluster: str, api_version: str, kind: str,
     Set ``limit`` (>0) to cap the number of items returned and keep the response
     token-efficient on large or unknown CRD collections."""
     group, version = _parse_api_version(api_version)
-    plural = _kind_to_plural(kind)
+    plural, _ = _resolve_resource(cluster, api_version, kind)
     kwargs: dict[str, Any] = {}
     if label_selector:
         kwargs["label_selector"] = label_selector
@@ -899,12 +900,17 @@ def create_or_update_resource(cluster: str, manifest: dict[str, Any]) -> dict[st
 
 def delete_resource(cluster: str, api_version: str, kind: str,
                     name: str, namespace: str | None = None) -> dict[str, Any]:
-    """Delete any Kubernetes resource."""
+    """Delete any Kubernetes resource (core or CRD)."""
     group, version = _parse_api_version(api_version)
-    plural = _kind_to_plural(kind)
-    custom = _custom(cluster)
+    plural, _ = _resolve_resource(cluster, api_version, kind)
 
     try:
+        if group == "":
+            # Core API group — CustomObjectsApi cannot reach /api/v1/...
+            _core_api_request(cluster, version, plural, name=name,
+                              namespace=namespace, method="DELETE")
+            return {"status": "deleted", "kind": kind, "name": name}
+        custom = _custom(cluster)
         if namespace:
             custom.delete_namespaced_custom_object(group, version, namespace, plural, name)
         else:
@@ -955,6 +961,172 @@ def describe_resource(cluster: str, api_version: str, kind: str,
         "resource": resource,
         "events": events_data,
     }
+
+
+# ── API Discovery & Custom Resources (CRD / CR) ──────────────────────────────
+
+# Cache of (cluster, api_version) -> APIResourceList.resources. Discovery docs
+# are effectively static for the life of a process, so caching avoids a request
+# per generic-resource call.
+_DISCOVERY_CACHE: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+
+def _discovery_doc(cluster: str, api_version: str) -> list[dict[str, Any]]:
+    """Return the ``resources`` list from the discovery doc for an apiVersion.
+
+    Core group → ``/api/{version}``; grouped APIs/CRDs → ``/apis/{group}/{version}``.
+    Returns ``[]`` (cached) if discovery is unavailable so callers can fall back.
+    """
+    import json as _json
+
+    key = (cluster, api_version)
+    if key in _DISCOVERY_CACHE:
+        return _DISCOVERY_CACHE[key]
+
+    group, version = _parse_api_version(api_version)
+    path = f"/api/{version}" if group == "" else f"/apis/{group}/{version}"
+    try:
+        resp = _api(cluster).call_api(
+            path, "GET",
+            header_params={"Accept": "application/json"},
+            auth_settings=[], _preload_content=False, _return_http_data_only=True,
+        )
+        resources = _json.loads(resp.data).get("resources", []) or []
+    except Exception:  # noqa: BLE001 - discovery is best-effort
+        resources = []
+    _DISCOVERY_CACHE[key] = resources
+    return resources
+
+
+def _resolve_resource(cluster: str, api_version: str, kind: str) -> tuple[str, bool | None]:
+    """Resolve ``(plural, namespaced)`` for a Kind via API discovery, falling
+    back to the heuristic pluralizer when discovery is unavailable.
+
+    Discovery is authoritative: it returns the real plural and scope, which the
+    ``_kind_to_plural`` heuristic gets wrong for many CRDs (e.g. Kind ``Gateway``
+    → heuristic ``gatewaies`` vs real ``gateways``)."""
+    for r in _discovery_doc(cluster, api_version):
+        # Skip subresources (e.g. "pods/status") which carry a "/" in the name.
+        if r.get("kind") == kind and "/" not in r.get("name", ""):
+            return r["name"], r.get("namespaced")
+    return _kind_to_plural(kind), None
+
+
+def _all_group_versions(cluster: str) -> list[str]:
+    """All served group/versions (core + each group's preferred version)."""
+    import json as _json
+
+    gvs = ["v1"]  # core API group
+    try:
+        resp = _api(cluster).call_api(
+            "/apis", "GET",
+            header_params={"Accept": "application/json"},
+            auth_settings=[], _preload_content=False, _return_http_data_only=True,
+        )
+        for g in _json.loads(resp.data).get("groups", []):
+            pv = (g.get("preferredVersion") or {}).get("groupVersion")
+            if pv:
+                gvs.append(pv)
+    except Exception:  # noqa: BLE001
+        pass
+    return gvs
+
+
+def list_api_resources(cluster: str, api_version: str = "") -> list[dict[str, Any]]:
+    """List served API resources (like ``kubectl api-resources``).
+
+    With ``api_version`` (e.g. ``cert-manager.io/v1``), lists that group's kinds.
+    Without it, enumerates every served group at its preferred version — the way
+    to discover which custom (and built-in) kinds exist before querying them."""
+    gvs = [api_version] if api_version else _all_group_versions(cluster)
+    results: list[dict[str, Any]] = []
+    for gv in gvs:
+        for r in _discovery_doc(cluster, gv):
+            if "/" in r.get("name", ""):  # skip subresources
+                continue
+            results.append({
+                "kind": r.get("kind"),
+                "name": r.get("name"),
+                "api_version": gv,
+                "namespaced": r.get("namespaced"),
+                "short_names": r.get("shortNames", []) or [],
+                "verbs": r.get("verbs", []) or [],
+            })
+    return results
+
+
+def list_crds(cluster: str, label_selector: str = "") -> list[dict[str, Any]]:
+    """List CustomResourceDefinitions with the info needed to query their CRs:
+    group, kind, plural, scope, served/storage versions, and short names."""
+    custom = _custom(cluster)
+    kwargs: dict[str, Any] = {}
+    if label_selector:
+        kwargs["label_selector"] = label_selector
+    try:
+        obj = custom.list_cluster_custom_object(
+            "apiextensions.k8s.io", "v1", "customresourcedefinitions", **kwargs
+        )
+    except ApiException as e:
+        return [{"error": str(e)}]
+
+    out: list[dict[str, Any]] = []
+    for item in obj.get("items", []):
+        spec = item.get("spec", {}) or {}
+        names = spec.get("names", {}) or {}
+        versions = spec.get("versions", []) or []
+        served = [v.get("name") for v in versions if v.get("served")]
+        storage = next((v.get("name") for v in versions if v.get("storage")), None)
+        out.append({
+            "name": item.get("metadata", {}).get("name"),
+            "group": spec.get("group"),
+            "kind": names.get("kind"),
+            "plural": names.get("plural"),
+            "short_names": names.get("shortNames", []) or [],
+            "scope": spec.get("scope"),
+            "served_versions": served,
+            "storage_version": storage,
+            "created": item.get("metadata", {}).get("creationTimestamp"),
+        })
+    return out
+
+
+def _crd_for_kind(cluster: str, kind: str) -> dict[str, Any] | None:
+    """Find a CRD entry by Kind (case-insensitive)."""
+    kl = kind.lower()
+    for crd in list_crds(cluster):
+        if (crd.get("kind") or "").lower() == kl:
+            return crd
+    return None
+
+
+def _api_version_for_crd(crd: dict[str, Any]) -> str:
+    version = crd.get("storage_version") or (crd.get("served_versions") or [None])[0]
+    return f"{crd['group']}/{version}"
+
+
+def list_custom_resources(cluster: str, kind: str, namespace: str | None = None,
+                          label_selector: str = "", limit: int = 0) -> list[dict[str, Any]]:
+    """List Custom Resources by Kind alone — the CRD is looked up to resolve its
+    group, served version, plural, and scope, so the caller need not know them.
+
+    For namespaced kinds, omit ``namespace`` to list across all namespaces."""
+    crd = _crd_for_kind(cluster, kind)
+    if not crd:
+        return [{"error": f"No CRD found for kind '{kind}'. Use list_crds to see available kinds."}]
+    api_version = _api_version_for_crd(crd)
+    ns = namespace if crd.get("scope") == "Namespaced" else None
+    return list_resources(cluster, api_version, crd["kind"], ns, label_selector, "", limit)
+
+
+def get_custom_resource(cluster: str, kind: str, name: str,
+                        namespace: str | None = None) -> dict[str, Any]:
+    """Get a single Custom Resource by Kind and name (CRD resolved automatically)."""
+    crd = _crd_for_kind(cluster, kind)
+    if not crd:
+        return {"error": f"No CRD found for kind '{kind}'. Use list_crds to see available kinds."}
+    api_version = _api_version_for_crd(crd)
+    ns = namespace if crd.get("scope") == "Namespaced" else None
+    return get_resource(cluster, api_version, crd["kind"], name, ns)
 
 
 # ── StatefulSet Operations ───────────────────────────────────────────────────

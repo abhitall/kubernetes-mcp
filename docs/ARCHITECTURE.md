@@ -134,7 +134,7 @@ flowchart TB
 
     subgraph Logic["Business Logic Layer"]
       EfficientOps["efficient_ops<br/>(compose + summarize + filter)"]
-      K8sOps["k8s_ops<br/>(primitives + core-API router)"]
+      K8sOps["k8s_ops<br/>(primitives + discovery<br/>+ core-API router)"]
       RCA["rca"]
       SelfHeal["self_heal"]
     end
@@ -165,6 +165,30 @@ flowchart TB
 > the Anthropic research it is based on, and live-cluster measurements
 > (e.g. **98.2%** fewer tokens for a concise pod payload) are documented in
 > [TOOL_EFFICIENCY.md](TOOL_EFFICIENCY.md).
+
+### 2.4 Custom Resources & API Discovery
+
+Generic resource access (`get_resource`/`list_resources`/`delete_resource`) and
+the CRD tools (`list_crds`, `list_api_resources`, `list_custom_resources`,
+`get_custom_resource`) resolve a Kind's **plural name and scope from the live
+cluster's discovery documents** (`/api/v1`, `/apis/{group}/{version}`, `/apis`),
+cached per `(cluster, apiVersion)`. This replaces a brittle string-pluralization
+heuristic that produced wrong plurals for many CRDs (e.g. `Gateway` →
+`gatewaies`). When discovery is unavailable the heuristic remains as a fallback.
+
+```mermaid
+flowchart LR
+  Kind["api_version + Kind"] --> Resolve["_resolve_resource()"]
+  Resolve --> Disc{"discovery hit?"}
+  Disc -- "yes" --> Real["real plural + namespaced<br/>(from APIResourceList)"]
+  Disc -- "no" --> Heur["_kind_to_plural()<br/>heuristic fallback"]
+  Real --> Call["CustomObjectsApi (grouped)<br/>or core /api router"]
+  Heur --> Call
+```
+
+`list_custom_resources`/`get_custom_resource` go one step further: given only a
+Kind, they look up the CRD to fill in group, served version, plural, and scope —
+so an agent can fetch CRs without knowing the apiVersion.
 
 ### 2.2 Request Lifecycle
 

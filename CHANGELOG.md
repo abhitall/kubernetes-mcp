@@ -9,6 +9,10 @@ Semantic Versioning.
 
 ### Added
 
+- **Custom Resource (CRD/CR) support**: `list_crds`, `list_api_resources`
+  (like `kubectl api-resources`), and `list_custom_resources`/`get_custom_resource`
+  that query CRs **by Kind alone** — the CRD is looked up to resolve group,
+  served version, plural, and scope automatically.
 - **Token-efficient / consolidated tools** that fold multi-step workflows into a
   single high-signal call, reducing tool calls and tokens (grounded in
   Anthropic's agent-tooling guidance; see `docs/TOOL_EFFICIENCY.md`):
@@ -30,6 +34,10 @@ Semantic Versioning.
   `project_resource`) now work for **core** API kinds (Pod, Service, Node, …),
   which previously 404'd because they were routed through `CustomObjectsApi`
   (grouped-API only) instead of the core `/api/{version}` path.
+- Generic resource ops now resolve the plural name and scope via **API
+  discovery** (cached, with heuristic fallback) instead of the `_kind_to_plural`
+  guess, which produced wrong plurals for many CRDs (e.g. Kind `Gateway` →
+  `gatewaies`).
 - `Dockerfile` now copies the package source, `README.md`, and `LICENSE` before
   `pip install .`, so the hatchling build succeeds.
 
